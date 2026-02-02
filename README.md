@@ -21,8 +21,8 @@ Think of it as a replacement for Bazarr, but powered by AI transcription instead
 ### 1. Clone and Configure
 
 ```bash
-git clone https://github.com/youruser/ai-sub.git
-cd ai-sub
+git clone https://github.com/youruser/subarr.git
+cd subarr
 
 # Copy example config and edit
 cp .env.example .env
