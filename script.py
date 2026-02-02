@@ -3284,7 +3284,8 @@ async def batch_import(items: List[Dict] = Body(...)):
         if not item.get("path"):
             failed.append({"folder": item.get("folder_name", "unknown"), "reason": "Missing path"})
             continue
-        
+
+        details = None  # Initialize to avoid using stale value from previous iteration
         tmdb_id = item.get("tmdb_id")
         media_type = item.get("media_type", "tv")
         folder_path = item["path"]
