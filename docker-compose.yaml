@@ -1,0 +1,55 @@
+# AI-SUB v6.0 - Library Manager with TMDB Integration
+# Copy .env.example to .env and configure your paths
+
+services:
+  subarr:
+    build: .
+    container_name: subarr
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - ${RENDER_GROUP}
+    ports:
+      - "${AI_SUB_PORT}:9000"
+    volumes:
+      - ./data:/data
+      - ./cache/whisper:/root/.cache/whisper
+      - ./cache/huggingface:/root/.cache/huggingface
+      - ./cache/torch-hub:/root/.cache/torch/hub
+      - ./output:/output
+      - ${MEDIA_TV}:/media/tv:rw
+      - ${MEDIA_MOVIES}:/media/movies:rw
+      - ${MEDIA_ANIME}:/media/anime:rw
+    environment:
+      # GPU selection (check with: ls /dev/dri/)
+      - ONEAPI_DEVICE_SELECTOR=${GPU_SELECTOR}
+      - ZE_FLAT_DEVICE_HIERARCHY=COMPOSITE
+      - WHISPER_MODEL=${WHISPER_MODEL}
+      - COMPUTE_TYPE=${COMPUTE_TYPE}
+      - WEBHOOKPORT=9000
+      - DEBUG=${DEBUG:-true}
+      - TMDB_API_KEY=${TMDB_API_KEY}
+      - DATA_DIR=/data
+      - OUTPUT_DIR=/output
+      - LIBRARY_SCAN_INTERVAL=${LIBRARY_SCAN_INTERVAL:-300}
+      - MUX_SUBTITLES=${MUX_SUBTITLES:-true}
+      - REPLACE_ORIGINAL=${REPLACE_ORIGINAL}
+      - DELETE_SRT_AFTER_MUX=${DELETE_SRT_AFTER_MUX}
+      - VAD_ENABLED=true
+      - VAD_THRESHOLD=0.35
+      - TORCH_HUB_DIR=/root/.cache/torch/hub
+      - SUPPRESS_SILENCE=true
+      - SUPPRESS_WORD_TS=true
+      - USE_REGROUP=true
+      - CUSTOM_REGROUP=cm_sl=84_sl=42++++++1
+      - USE_MODEL_PROMPT=true
+      - MODEL_PROMPT=Hello, welcome to my video.
+      - WHISPER_THREADS=${WHISPER_THREADS}
+      - CONCURRENT_TRANSCRIPTIONS=1
+      - CLEAR_VRAM_ON_COMPLETE=true
+      - MAX_CHARS_PER_LINE=42
+      - MIN_SEGMENT_DURATION=0.5
+      - LANG_SAMPLE_SECONDS=30
+      - LANG_SAMPLE_OFFSET=60
+      - ALLOW_UNKNOWN_AS_ENGLISH=false
