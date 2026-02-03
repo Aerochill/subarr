@@ -690,11 +690,11 @@ class DatabaseManager:
             rows = conn.execute("""
                 SELECT m.*,
                     COUNT(f.id) as file_count,
-                    SUM(CASE WHEN f.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                    SUM(CASE WHEN f.status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as completed_count,
                     SUM(CASE WHEN f.status = 'pending' THEN 1 ELSE 0 END) as pending_count,
                     SUM(CASE WHEN f.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
                     SUM(CASE WHEN f.status = 'processing' THEN 1 ELSE 0 END) as processing_count,
-                    SUM(CASE WHEN f.status = 'skipped' THEN 1 ELSE 0 END) as skipped_count
+                    0 as skipped_count
                 FROM media m
                 LEFT JOIN files f ON f.media_id = m.id
                 WHERE m.library_id = ?
@@ -712,11 +712,11 @@ class DatabaseManager:
             rows = conn.execute("""
                 SELECT m.*,
                     COUNT(f.id) as file_count,
-                    SUM(CASE WHEN f.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                    SUM(CASE WHEN f.status IN ('completed', 'skipped') THEN 1 ELSE 0 END) as completed_count,
                     SUM(CASE WHEN f.status = 'pending' THEN 1 ELSE 0 END) as pending_count,
                     SUM(CASE WHEN f.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
                     SUM(CASE WHEN f.status = 'processing' THEN 1 ELSE 0 END) as processing_count,
-                    SUM(CASE WHEN f.status = 'skipped' THEN 1 ELSE 0 END) as skipped_count
+                    0 as skipped_count
                 FROM media m
                 LEFT JOIN files f ON f.media_id = m.id
                 GROUP BY m.id
@@ -886,6 +886,8 @@ class DatabaseManager:
     def update_file_status(self, file_path: str, status: str, subtitle_path: str = None, error: str = None):
         conn = self._get_conn()
         try:
+            if status == "skipped":
+                status = "completed"
             if status == "completed":
                 conn.execute("""
                     UPDATE files SET status = ?, subtitle_path = ?, processed_at = CURRENT_TIMESTAMP
@@ -912,8 +914,21 @@ class DatabaseManager:
             stats["processing"] = conn.execute("SELECT COUNT(*) FROM files WHERE status = 'processing'").fetchone()[0]
             stats["completed"] = conn.execute("SELECT COUNT(*) FROM files WHERE status = 'completed'").fetchone()[0]
             stats["failed"] = conn.execute("SELECT COUNT(*) FROM files WHERE status = 'failed'").fetchone()[0]
-            stats["skipped"] = conn.execute("SELECT COUNT(*) FROM files WHERE status = 'skipped'").fetchone()[0]
+            stats["skipped"] = 0
             return stats
+        finally:
+            conn.close()
+
+    def normalize_skipped_files(self):
+        """Convert skipped files to completed so skipped is not treated as a separate state."""
+        conn = self._get_conn()
+        try:
+            conn.execute("""
+                UPDATE files
+                SET status = 'completed', processed_at = COALESCE(processed_at, CURRENT_TIMESTAMP)
+                WHERE status = 'skipped'
+            """)
+            conn.commit()
         finally:
             conn.close()
     
@@ -1977,7 +1992,7 @@ class LibraryScanner:
                 
                 if has_ai_subtitle(file_path):
                     self.db.add_file(media_id, file_path, os.path.getsize(file_path))
-                    self.db.update_file_status(file_path, "skipped")
+                    self.db.update_file_status(file_path, "completed")
                     found["skipped"] += 1
                     continue
                 
@@ -2490,8 +2505,8 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 <div class="text-xl font-bold text-red-400">{{ stats.failed || 0 }}</div>
                 <div class="text-xs text-gray-400">Failed</div>
             </div>
-            <div class="card rounded-lg p-3 text-center stat-card" :class="{active: filesFilter === 'skipped'}" @click="showFiles('skipped')">
-                <div class="text-xl font-bold text-gray-400">{{ stats.skipped || 0 }}</div>
+            <div class="card rounded-lg p-3 text-center stat-card opacity-50">
+                <div class="text-xl font-bold text-gray-400">-</div>
                 <div class="text-xs text-gray-400">Skipped</div>
             </div>
         </div>
@@ -2721,7 +2736,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         <div v-if="tab === 'files'">
             <div class="flex justify-between items-center mb-4">
                 <div class="flex space-x-2">
-                    <button v-for="s in ['pending', 'processing', 'completed', 'failed', 'skipped']" :key="s"
+                    <button v-for="s in ['pending', 'processing', 'completed', 'failed']" :key="s"
                             @click="filesFilter = s; loadFiles()"
                             :class="filesFilter === s ? 'btn-primary' : 'btn-secondary'"
                             class="px-3 py-1 rounded text-sm capitalize">{{ s }}</button>
@@ -2736,11 +2751,6 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                             @click="retryAllFailed" 
                             class="btn-success px-3 py-1 rounded text-sm">
                         Retry All Failed ({{ files.length }})
-                    </button>
-                    <button v-if="filesFilter === 'skipped' && files.length > 0" 
-                            @click="requeueSkipped" 
-                            class="bg-yellow-600 hover:bg-yellow-500 px-3 py-1 rounded text-sm">
-                        Requeue Skipped ({{ files.length }})
                     </button>
                 </div>
             </div>
@@ -2798,9 +2808,8 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                             <span class="text-green-400">✓ {{ selectedMedia.completed_count || 0 }}</span>
                             <span class="text-yellow-400">⏳ {{ selectedMedia.pending_count || 0 }}</span>
                             <span class="text-red-400">✗ {{ selectedMedia.failed_count || 0 }}</span>
-                            <span class="text-gray-500">⊘ {{ selectedMedia.skipped_count || 0 }}</span>
-                            <span class="text-gray-400">{{ (selectedMedia.file_count || 0) }} total</span>
-                        </div>
+                    <span class="text-gray-400">{{ (selectedMedia.file_count || 0) }} total</span>
+                </div>
                         <div class="flex gap-2 mt-3 flex-wrap">
                             <button @click="queueAllMediaFiles(selectedMedia.id)" class="btn-primary px-3 py-1 rounded text-sm">⏳ Queue All</button>
                             <button @click="scanMedia(selectedMedia.id)" class="btn-secondary px-3 py-1 rounded text-sm">🔄 Rescan</button>
@@ -2880,6 +2889,10 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     <button @click="closeFixMatch" class="text-gray-400 hover:text-white text-2xl">&times;</button>
                 </div>
                 <div class="flex-1 overflow-y-auto p-4 space-y-2">
+                    <div class="flex gap-2 mb-3">
+                        <input v-model="fixMatchQuery" @keyup.enter="searchFixMatch" placeholder="Search TMDB..." class="flex-1 bg-gray-700 rounded px-3 py-2 text-sm">
+                        <button @click="searchFixMatch" class="btn-primary px-3 py-2 rounded text-sm">Search</button>
+                    </div>
                     <div v-if="fixMatchLoading" class="text-center text-gray-400 py-8">Searching TMDB...</div>
                     <div v-else-if="fixMatchOptions.length === 0" class="text-center text-gray-400 py-8">No matches found.</div>
                     <div v-else>
@@ -2976,6 +2989,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             const fixMatchOptions = ref([]);
             const fixMatchLoading = ref(false);
             const fixMatchMedia = ref(null);
+            const fixMatchQuery = ref('');
             
             // File browser
             const showBrowser = ref(false);
@@ -3198,6 +3212,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 showFixMatchModal.value = true;
                 fixMatchLoading.value = true;
                 fixMatchOptions.value = [];
+                fixMatchQuery.value = '';
                 try {
                     const result = await api('GET', `/api/media/${id}/tmdb-matches`);
                     fixMatchOptions.value = result.matches || [];
@@ -3245,11 +3260,26 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 closeFixMatch();
             };
 
+            const searchFixMatch = async () => {
+                if (!fixMatchMedia.value || !fixMatchQuery.value) {
+                    showToast('Enter a search term.');
+                    return;
+                }
+                fixMatchLoading.value = true;
+                try {
+                    const result = await api('GET', `/api/media/${fixMatchMedia.value.id}/tmdb-search?query=${encodeURIComponent(fixMatchQuery.value)}`);
+                    fixMatchOptions.value = result.matches || [];
+                } finally {
+                    fixMatchLoading.value = false;
+                }
+            };
+
             const closeFixMatch = () => {
                 showFixMatchModal.value = false;
                 fixMatchOptions.value = [];
                 fixMatchMedia.value = null;
                 fixMatchLoading.value = false;
+                fixMatchQuery.value = '';
             };
             
             const addLibrary = async () => {
@@ -3369,13 +3399,13 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 searchQuery, searchResults, selectedResult, suggestedProfile, importPath, importProfile,
                 newLibraryPath, openLibraryMenu,
                 mediaLibFilter, selectedMedia, mediaFiles, filteredMedia, manageMode, selectedMediaIds,
-                showFixMatchModal, fixMatchOptions, fixMatchLoading, fixMatchMedia,
+                showFixMatchModal, fixMatchOptions, fixMatchLoading, fixMatchMedia, fixMatchQuery,
                 showBrowser, browserPath, browserParent, browserItems, browseTarget,
                 selectedCount, allSelected,
                 showFiles, loadFiles, scanLibraryPreview, selectAllPreviews, importSelected,
                 searchTMDB, selectResult, importMedia, scanMedia, deleteMedia, updateProfile,
                 openMediaDetail, queueFile, queueAllMediaFiles, handleMediaClick, fixMatch,
-                fixMatchSelected, rescanSelected, deleteSelected, applyFixMatch, closeFixMatch,
+                fixMatchSelected, rescanSelected, deleteSelected, applyFixMatch, searchFixMatch, closeFixMatch,
                 addLibrary, removeLibrary, toggleLibraryMenu, updateLibrarySettings,
                 browseTo, selectBrowserPath, cancelProcessing, retryFile, retryAllFailed, requeueSkipped, clearPending, resyncFile
             };
@@ -3395,6 +3425,7 @@ async def startup_event():
     
     db = DatabaseManager(DATABASE_PATH)
     db.reset_stuck_processing()  # Reset any files stuck from previous crash
+    db.normalize_skipped_files()
     
     tmdb = TMDBClient(TMDB_API_KEY)
     
@@ -3829,6 +3860,21 @@ async def tmdb_match_options(media_id: int):
     matches = get_tmdb_match_options(media)
     return {"media_id": media_id, "matches": matches}
 
+@app.get("/api/media/{media_id}/tmdb-search")
+async def tmdb_match_search(media_id: int, query: str):
+    media = db.get_media_by_id(media_id)
+    if not media:
+        raise HTTPException(404, "Media not found")
+    if not query.strip():
+        return {"media_id": media_id, "matches": []}
+
+    matches = tmdb.search_multi(query.strip())
+    media_type = media.get("media_type")
+    if media_type in ("movie", "tv"):
+        matches = [m for m in matches if m.get("media_type") == media_type]
+
+    return {"media_id": media_id, "matches": matches[:10]}
+
 @app.post("/api/media/{media_id}/apply-match")
 async def apply_tmdb_match(
     media_id: int,
@@ -3986,7 +4032,7 @@ async def list_profiles():
 @app.get("/api/files/{status}")
 async def get_files_by_status(status: str, limit: int = Query(100, ge=1, le=500)):
     """Get files filtered by status (pending, processing, completed, failed, skipped)"""
-    valid_statuses = ["pending", "processing", "completed", "failed", "skipped"]
+    valid_statuses = ["pending", "processing", "completed", "failed"]
     if status not in valid_statuses:
         raise HTTPException(400, f"Invalid status. Must be one of: {valid_statuses}")
     return db.get_files_by_status(status, limit)
