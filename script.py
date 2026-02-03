@@ -2528,7 +2528,8 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 </label>
                 <div v-if="manageMode" class="flex items-center gap-2 flex-wrap">
                     <span class="text-xs text-gray-400">{{ selectedMediaIds.length }} selected</span>
-                    <button @click="fixMatchSelected" :disabled="selectedMediaIds.length !== 1" class="btn-secondary px-3 py-1 rounded text-sm disabled:opacity-50">🧩 Fix Match</button>
+                    <button @click="toggleSelectAll" class="btn-secondary px-3 py-1 rounded text-sm">{{ allManageSelected ? 'Deselect All' : 'Select All' }}</button>
+                    <button disabled class="btn-secondary px-3 py-1 rounded text-sm opacity-50 cursor-not-allowed">🧩 Fix Match</button>
                     <button @click="rescanSelected" :disabled="selectedMediaIds.length === 0" class="btn-secondary px-3 py-1 rounded text-sm disabled:opacity-50">🔄 Rescan</button>
                     <button @click="deleteSelected" :disabled="selectedMediaIds.length === 0" class="btn-danger px-3 py-1 rounded text-sm disabled:opacity-50">🗑 Delete</button>
                 </div>
@@ -2888,14 +2889,14 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     </div>
                     <button @click="closeFixMatch" class="text-gray-400 hover:text-white text-2xl">&times;</button>
                 </div>
-                <div class="flex-1 overflow-y-auto p-4 space-y-2">
+                <div class="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin">
                     <div class="flex gap-2 mb-3">
                         <input v-model="fixMatchQuery" @keyup.enter="searchFixMatch" placeholder="Search TMDB..." class="flex-1 bg-gray-700 rounded px-3 py-2 text-sm">
                         <button @click="searchFixMatch" class="btn-primary px-3 py-2 rounded text-sm">Search</button>
                     </div>
                     <div v-if="fixMatchLoading" class="text-center text-gray-400 py-8">Searching TMDB...</div>
                     <div v-else-if="fixMatchOptions.length === 0" class="text-center text-gray-400 py-8">No matches found.</div>
-                    <div v-else>
+                    <div v-else class="max-h-96 overflow-y-auto scrollbar-thin">
                         <div v-for="option in fixMatchOptions" :key="option.tmdb_id + option.media_type"
                              class="card rounded p-3 cursor-pointer hover:border-blue-500 flex items-center gap-3"
                              @click="applyFixMatch(option)">
@@ -3012,6 +3013,10 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             const allSelected = computed(() => {
                 if (!scanPreview.value) return false;
                 return scanPreview.value.previews.length > 0 && scanPreview.value.previews.every(p => p.selected);
+            });
+
+            const allManageSelected = computed(() => {
+                return filteredMedia.value.length > 0 && selectedMediaIds.value.length === filteredMedia.value.length;
             });
             
             const showToast = (msg) => { toast.value = msg; setTimeout(() => toast.value = '', 3000); };
@@ -3170,6 +3175,14 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     selectedMediaIds.value.splice(index, 1);
                 } else {
                     selectedMediaIds.value.push(mediaId);
+                }
+            };
+
+            const toggleSelectAll = () => {
+                if (allManageSelected.value) {
+                    selectedMediaIds.value = [];
+                } else {
+                    selectedMediaIds.value = filteredMedia.value.map(item => item.id);
                 }
             };
 
@@ -3343,14 +3356,6 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 await refresh();
             };
             
-            const requeueSkipped = async () => {
-                if (!confirm('Requeue all skipped files? They will be processed again.')) return;
-                const result = await api('POST', '/api/files/requeue-skipped');
-                showToast(`${result.count} skipped files requeued`);
-                await loadFiles();
-                await refresh();
-            };
-            
             const clearPending = async () => {
                 if (!confirm('Remove all pending files from the queue? This cannot be undone.')) return;
                 const result = await api('POST', '/api/files/clear-pending');
@@ -3401,13 +3406,14 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 mediaLibFilter, selectedMedia, mediaFiles, filteredMedia, manageMode, selectedMediaIds,
                 showFixMatchModal, fixMatchOptions, fixMatchLoading, fixMatchMedia, fixMatchQuery,
                 showBrowser, browserPath, browserParent, browserItems, browseTarget,
-                selectedCount, allSelected,
+                selectedCount, allSelected, allManageSelected,
                 showFiles, loadFiles, scanLibraryPreview, selectAllPreviews, importSelected,
                 searchTMDB, selectResult, importMedia, scanMedia, deleteMedia, updateProfile,
                 openMediaDetail, queueFile, queueAllMediaFiles, handleMediaClick, fixMatch,
                 fixMatchSelected, rescanSelected, deleteSelected, applyFixMatch, searchFixMatch, closeFixMatch,
+                toggleSelectAll,
                 addLibrary, removeLibrary, toggleLibraryMenu, updateLibrarySettings,
-                browseTo, selectBrowserPath, cancelProcessing, retryFile, retryAllFailed, requeueSkipped, clearPending, resyncFile
+                browseTo, selectBrowserPath, cancelProcessing, retryFile, retryAllFailed, clearPending, resyncFile
             };
         }
     }).mount('#app');
@@ -3873,7 +3879,7 @@ async def tmdb_match_search(media_id: int, query: str):
     if media_type in ("movie", "tv"):
         matches = [m for m in matches if m.get("media_type") == media_type]
 
-    return {"media_id": media_id, "matches": matches[:10]}
+    return {"media_id": media_id, "matches": matches}
 
 @app.post("/api/media/{media_id}/apply-match")
 async def apply_tmdb_match(
