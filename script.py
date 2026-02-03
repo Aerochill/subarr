@@ -2891,7 +2891,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 </div>
                 <div class="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin">
                     <div class="flex gap-2 mb-3">
-                        <input v-model="fixMatchQuery" @keyup.enter="searchFixMatch" placeholder="Search TMDB..." class="flex-1 bg-gray-700 rounded px-3 py-2 text-sm">
+                        <input v-model="fixMatchQuery" @keyup.enter="searchFixMatch" placeholder="Search TMDB (title or ID)..." class="flex-1 bg-gray-700 rounded px-3 py-2 text-sm">
                         <button @click="searchFixMatch" class="btn-primary px-3 py-2 rounded text-sm">Search</button>
                     </div>
                     <div v-if="fixMatchLoading" class="text-center text-gray-400 py-8">Searching TMDB...</div>
@@ -3874,7 +3874,39 @@ async def tmdb_match_search(media_id: int, query: str):
     if not query.strip():
         return {"media_id": media_id, "matches": []}
 
-    matches = tmdb.search_multi(query.strip())
+    query_value = query.strip()
+    id_match = re.fullmatch(r"(?:tmdb:)?(\d+)", query_value, re.IGNORECASE)
+    if id_match:
+        tmdb_id = int(id_match.group(1))
+        media_type = media.get("media_type")
+
+        details = None
+        if media_type == "tv":
+            details = tmdb.get_tv_details(tmdb_id)
+        elif media_type == "movie":
+            details = tmdb.get_movie_details(tmdb_id)
+        else:
+            details = tmdb.get_movie_details(tmdb_id) or tmdb.get_tv_details(tmdb_id)
+
+        if not details:
+            return {"media_id": media_id, "matches": []}
+
+        return {
+            "media_id": media_id,
+            "matches": [
+                {
+                    "tmdb_id": details["tmdb_id"],
+                    "title": details["title"],
+                    "original_title": details.get("original_title", ""),
+                    "year": details.get("year"),
+                    "overview": "",
+                    "poster_path": details.get("poster_path"),
+                    "media_type": details.get("media_type", media_type or "movie")
+                }
+            ]
+        }
+
+    matches = tmdb.search_multi(query_value)
     media_type = media.get("media_type")
     if media_type in ("movie", "tv"):
         matches = [m for m in matches if m.get("media_type") == media_type]
