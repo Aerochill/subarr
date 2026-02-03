@@ -754,49 +754,6 @@ class DatabaseManager:
             conn.commit()
         finally:
             conn.close()
-
-    def update_media_match(self, media_id: int, tmdb_id: int, media_type: str, title: str,
-                           year: Optional[int], genres: List, origin_country: List,
-                           poster_path: str = None, profile: str = None):
-        """Update media entry with new TMDB match data"""
-        conn = self._get_conn()
-        try:
-            if profile:
-                conn.execute("""
-                    UPDATE media SET
-                        tmdb_id = ?, media_type = ?, title = ?, year = ?,
-                        genres = ?, origin_country = ?, poster_path = ?, profile = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                """, (tmdb_id, media_type, title, year, json.dumps(genres),
-                      json.dumps(origin_country), poster_path, profile, media_id))
-            else:
-                conn.execute("""
-                    UPDATE media SET
-                        tmdb_id = ?, media_type = ?, title = ?, year = ?,
-                        genres = ?, origin_country = ?, poster_path = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                """, (tmdb_id, media_type, title, year, json.dumps(genres),
-                      json.dumps(origin_country), poster_path, media_id))
-            conn.commit()
-        finally:
-            conn.close()
-
-    def delete_media_bulk(self, media_ids: List[int]) -> int:
-        """Delete multiple media entries and their files. Returns count deleted."""
-        conn = self._get_conn()
-        try:
-            if not media_ids:
-                return 0
-            placeholders = ','.join(['?' for _ in media_ids])
-            conn.execute(f"DELETE FROM files WHERE media_id IN ({placeholders})", media_ids)
-            cursor = conn.execute(f"DELETE FROM media WHERE id IN ({placeholders})", media_ids)
-            count = cursor.rowcount
-            conn.commit()
-            return count
-        finally:
-            conn.close()
     
     def queue_file(self, file_id: int) -> bool:
         """Force a file back to pending (works regardless of current status)"""
@@ -2341,12 +2298,6 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         .scrollbar-thin::-webkit-scrollbar { width: 6px; }
         .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
         .scrollbar-thin::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
-        .poster-card.selected { border: 2px solid #3b82f6; }
-        .poster-card .select-check { position: absolute; top: 0.5rem; left: 0.5rem; z-index: 20; width: 20px; height: 20px; background: rgba(0,0,0,0.6); border: 2px solid #6b7280; border-radius: 4px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
-        .poster-card .select-check.checked { background: #3b82f6; border-color: #3b82f6; }
-        .bulk-bar { position: fixed; bottom: 0; left: 0; right: 0; background: #1e293b; border-top: 1px solid #334155; padding: 1rem; z-index: 40; display: flex; justify-content: center; gap: 1rem; align-items: center; }
-        .btn-warning { background: #f59e0b; }
-        .btn-warning:hover { background: #d97706; }
     </style>
 </head>
 <body class="text-gray-100 min-h-screen">
@@ -2418,70 +2369,49 @@ WEB_UI_HTML = '''<!DOCTYPE html>
         </div>
 
         <!-- ==================== HOME TAB ==================== -->
-        <div v-if="tab === 'home'" :style="manageMode && selectedIds.length > 0 ? 'padding-bottom: 5rem;' : ''">
-            <!-- Library Filter + Manage Toggle -->
-            <div class="flex items-center justify-between gap-2 mb-4 flex-wrap">
-                <div class="flex items-center gap-2 flex-wrap">
-                    <button @click="mediaLibFilter = 'all'"
-                            :class="mediaLibFilter === 'all' ? 'btn-primary' : 'btn-secondary'"
-                            class="px-3 py-1 rounded text-sm">All ({{ media.length }})</button>
-                    <button v-for="lib in libraries" :key="lib.id"
-                            @click="mediaLibFilter = lib.id"
-                            :class="mediaLibFilter === lib.id ? 'btn-primary' : 'btn-secondary'"
-                            class="px-3 py-1 rounded text-sm">{{ lib.path.split('/').pop() }} ({{ media.filter(m => m.library_id === lib.id).length }})</button>
-                </div>
-                <div class="flex items-center gap-3">
-                    <button v-if="manageMode" @click="toggleSelectAll" class="btn-secondary px-3 py-1 rounded text-sm">
-                        {{ selectedIds.length === filteredMedia.length ? 'Deselect All' : 'Select All' }}
-                    </button>
-                    <label class="flex items-center gap-2 cursor-pointer">
-                        <span class="text-sm text-gray-400">Manage</span>
-                        <label class="toggle-switch">
-                            <input type="checkbox" v-model="manageMode" @change="selectedIds = []">
-                            <span class="toggle-slider"></span>
-                        </label>
-                    </label>
-                </div>
+        <div v-if="tab === 'home'">
+            <!-- Library Filter Tabs -->
+            <div class="flex items-center gap-2 mb-4 flex-wrap">
+                <button @click="mediaLibFilter = 'all'" 
+                        :class="mediaLibFilter === 'all' ? 'btn-primary' : 'btn-secondary'" 
+                        class="px-3 py-1 rounded text-sm">All ({{ media.length }})</button>
+                <button v-for="lib in libraries" :key="lib.id"
+                        @click="mediaLibFilter = lib.id" 
+                        :class="mediaLibFilter === lib.id ? 'btn-primary' : 'btn-secondary'" 
+                        class="px-3 py-1 rounded text-sm">{{ lib.path.split('/').pop() }} ({{ media.filter(m => m.library_id === lib.id).length }})</button>
             </div>
-
+            
             <!-- Poster Grid -->
             <div v-if="filteredMedia.length > 0" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-                <div v-for="m in filteredMedia" :key="m.id"
-                     @click="manageMode ? toggleSelect(m.id) : openMediaDetail(m)"
-                     class="poster-card cursor-pointer card"
-                     :class="{'selected': selectedIds.indexOf(m.id) !== -1}">
-
-                    <!-- Selection checkbox in manage mode -->
-                    <div v-if="manageMode" class="select-check" :class="{'checked': selectedIds.indexOf(m.id) !== -1}">
-                        <span v-if="selectedIds.indexOf(m.id) !== -1" class="text-white text-xs">✓</span>
-                    </div>
-
+                <div v-for="m in filteredMedia" :key="m.id" 
+                     @click="openMediaDetail(m)"
+                     class="poster-card cursor-pointer card">
                     <div class="poster-wrap">
-                        <img v-if="m.poster_path"
-                             :src="'https://image.tmdb.org/t/p/w300' + m.poster_path"
+                        <img v-if="m.poster_path" 
+                             :src="'https://image.tmdb.org/t/p/w300' + m.poster_path" 
                              :alt="m.title" loading="lazy">
                         <div v-else class="no-poster">
                             <div><div class="text-2xl mb-1">🎬</div>{{ m.title }}</div>
                         </div>
                     </div>
-
+                    
                     <!-- Status badge -->
                     <div class="absolute top-1 right-1">
-                        <span v-if="m.file_count > 0 && m.completed_count >= m.file_count"
+                        <span v-if="m.file_count > 0 && m.completed_count >= m.file_count" 
                               class="bg-green-600 text-white text-xs px-1.5 py-0.5 rounded font-bold">✓</span>
-                        <span v-else-if="m.processing_count > 0"
+                        <span v-else-if="m.processing_count > 0" 
                               class="bg-blue-600 text-white text-xs px-1.5 py-0.5 rounded animate-pulse">⟳</span>
-                        <span v-else-if="m.pending_count > 0"
+                        <span v-else-if="m.pending_count > 0" 
                               class="bg-yellow-600 text-white text-xs px-1.5 py-0.5 rounded">{{ m.pending_count }}</span>
-                        <span v-else-if="m.failed_count > 0"
+                        <span v-else-if="m.failed_count > 0" 
                               class="bg-red-600 text-white text-xs px-1.5 py-0.5 rounded">!</span>
                     </div>
-
+                    
                     <!-- Profile badge -->
-                    <div class="absolute top-1" :class="manageMode ? 'left-8' : 'left-1'">
+                    <div class="absolute top-1 left-1">
                         <span :class="'profile-' + m.profile" class="text-xs px-1 py-0.5 rounded font-bold uppercase" style="font-size:9px;">{{ m.profile }}</span>
                     </div>
-
+                    
                     <!-- Title overlay -->
                     <div class="overlay">
                         <div class="text-white text-xs font-medium truncate">{{ m.title }}</div>
@@ -2489,19 +2419,10 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     </div>
                 </div>
             </div>
-
+            
             <div v-else class="text-center text-gray-500 py-12">
                 <p class="text-lg mb-2">No media found</p>
                 <p class="text-sm">Go to the <span class="text-blue-400 cursor-pointer" @click="tab = 'import'">Import</span> tab to add media from your libraries.</p>
-            </div>
-
-            <!-- Bulk Action Bar -->
-            <div v-if="manageMode && selectedIds.length > 0" class="bulk-bar">
-                <span class="text-gray-400">{{ selectedIds.length }} selected</span>
-                <button @click="bulkRescan" class="btn-secondary px-4 py-2 rounded text-sm">🔄 Rescan</button>
-                <button @click="bulkQueue" class="btn-primary px-4 py-2 rounded text-sm">⏳ Queue All</button>
-                <button @click="bulkDelete" class="btn-danger px-4 py-2 rounded text-sm">🗑 Delete</button>
-                <button @click="selectedIds = []" class="btn-secondary px-4 py-2 rounded text-sm">Cancel</button>
             </div>
         </div>
 
@@ -2730,7 +2651,6 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                         <div class="flex gap-2 mt-3 flex-wrap">
                             <button @click="queueAllMediaFiles(selectedMedia.id)" class="btn-primary px-3 py-1 rounded text-sm">⏳ Queue All</button>
                             <button @click="scanMedia(selectedMedia.id)" class="btn-secondary px-3 py-1 rounded text-sm">🔄 Rescan</button>
-                            <button @click="openFixMatch(selectedMedia)" class="btn-warning px-3 py-1 rounded text-sm">🔍 Fix Match</button>
                             <select :value="selectedMedia.profile" @change="updateProfile(selectedMedia.id, $event.target.value)" class="bg-gray-700 rounded px-2 py-1 text-sm">
                                 <option v-for="(pr, key) in profiles" :value="key">{{ key }}</option>
                             </select>
@@ -2819,62 +2739,6 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- Fix Match Modal -->
-        <div v-if="fixMatchShow" class="fixed inset-0 modal flex items-center justify-center z-50 p-4" @click.self="fixMatchShow = false">
-            <div class="card rounded-lg w-full max-w-2xl max-h-full overflow-hidden flex flex-col" style="max-height: 80vh;">
-                <div class="flex justify-between items-center p-5 border-b border-gray-700">
-                    <div>
-                        <h3 class="font-semibold text-white text-lg">Fix Match</h3>
-                        <p class="text-gray-400 text-sm mt-1">Search TMDB for the correct match for "{{ fixMatchMedia ? fixMatchMedia.title : '' }}"</p>
-                    </div>
-                    <button @click="fixMatchShow = false" class="text-gray-400 hover:text-white text-2xl">&times;</button>
-                </div>
-                <div class="p-5 space-y-4 overflow-y-auto">
-                    <div class="flex gap-3">
-                        <input v-model="fixMatchQuery" @keyup.enter="searchForMatch" placeholder="Enter title to search..." class="flex-1 bg-gray-700 rounded px-3 py-2">
-                        <button @click="searchForMatch" :disabled="fixMatchSearching" class="btn-primary px-4 py-2 rounded">
-                            {{ fixMatchSearching ? 'Searching...' : 'Search' }}
-                        </button>
-                    </div>
-                    <div v-if="fixMatchResults.length > 0" class="space-y-2 max-h-64 overflow-y-auto">
-                        <div v-for="r in fixMatchResults" :key="r.tmdb_id + '-' + r.media_type"
-                             @click="fixMatchSelected = r"
-                             class="card rounded p-3 cursor-pointer hover:border-blue-500 flex items-center gap-3"
-                             :class="fixMatchSelected && fixMatchSelected.tmdb_id === r.tmdb_id ? 'border-blue-500' : ''">
-                            <img v-if="r.poster_path" :src="'https://image.tmdb.org/t/p/w92' + r.poster_path" class="w-12 h-16 rounded object-cover flex-shrink-0">
-                            <div v-else class="w-12 h-16 rounded bg-gray-700 flex items-center justify-center flex-shrink-0 text-lg">🎬</div>
-                            <div class="flex-1 min-w-0">
-                                <span class="text-white">{{ r.title }}</span>
-                                <span class="text-gray-400 text-sm ml-2">({{ r.year || '?' }})</span>
-                                <span class="text-xs px-2 py-0.5 rounded ml-2" :class="r.media_type === 'movie' ? 'bg-purple-600' : 'bg-blue-600'">{{ r.media_type }}</span>
-                                <div v-if="r.overview" class="text-xs text-gray-500 mt-1 truncate">{{ r.overview }}</div>
-                            </div>
-                            <div v-if="fixMatchSelected && fixMatchSelected.tmdb_id === r.tmdb_id" class="text-blue-400 text-xl">✓</div>
-                        </div>
-                    </div>
-                    <div v-if="fixMatchSelected" class="card rounded p-4 border-blue-500 border space-y-3">
-                        <div class="flex items-center gap-3">
-                            <img v-if="fixMatchSelected.poster_path" :src="'https://image.tmdb.org/t/p/w92' + fixMatchSelected.poster_path" class="w-12 h-16 rounded object-cover">
-                            <div>
-                                <div class="text-white font-medium">{{ fixMatchSelected.title }}</div>
-                                <div class="text-gray-400 text-sm">{{ fixMatchSelected.year }} - {{ fixMatchSelected.media_type }}</div>
-                            </div>
-                        </div>
-                        <label class="flex items-center gap-2 text-sm text-gray-400 cursor-pointer">
-                            <input type="checkbox" v-model="fixMatchUpdateProfile" class="rounded">
-                            Update profile based on TMDB metadata
-                        </label>
-                    </div>
-                </div>
-                <div class="p-5 border-t border-gray-700 flex justify-end gap-3">
-                    <button @click="fixMatchShow = false" class="btn-secondary px-4 py-2 rounded">Cancel</button>
-                    <button @click="applyFixMatch" :disabled="!fixMatchSelected || fixMatchApplying" class="btn-primary px-4 py-2 rounded">
-                        {{ fixMatchApplying ? 'Applying...' : 'Apply Match' }}
-                    </button>
-                </div>
-            </div>
-        </div>
-
         <!-- Toast -->
         <div v-if="toast" class="fixed bottom-4 right-4 bg-gray-800 border border-gray-600 rounded-lg px-4 py-3 shadow-lg z-50">{{ toast }}</div>
     </div>
@@ -2916,43 +2780,14 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             const mediaLibFilter = ref('all');
             const selectedMedia = ref(null);
             const mediaFiles = ref([]);
-
-            // Manage mode
-            const manageMode = ref(false);
-            const selectedMediaIds = ref([]);
-
-            // Fix Match
-            const showFixMatch = ref(false);
-            const fixMatchMedia = ref(null);
-            const fixMatchQuery = ref('');
-            const fixMatchResults = ref([]);
-            const fixMatchSelected = ref(null);
-            const fixMatchSearching = ref(false);
-            const fixMatchSearched = ref(false);
-            const fixMatchUpdateProfile = ref(true);
-            const fixMatchApplying = ref(false);
-
+            
             // File browser
             const showBrowser = ref(false);
             const browserPath = ref('/media');
             const browserParent = ref(null);
             const browserItems = ref([]);
             const browseTarget = ref('import');
-
-            // Manage mode
-            const manageMode = ref(false);
-            const selectedIds = ref([]);
-
-            // Fix Match
-            const fixMatchShow = ref(false);
-            const fixMatchMedia = ref(null);
-            const fixMatchQuery = ref('');
-            const fixMatchResults = ref([]);
-            const fixMatchSelected = ref(null);
-            const fixMatchSearching = ref(false);
-            const fixMatchUpdateProfile = ref(true);
-            const fixMatchApplying = ref(false);
-
+            
             // Computed
             const filteredMedia = computed(() => {
                 if (mediaLibFilter.value === 'all') return media.value;
@@ -2968,12 +2803,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 if (!scanPreview.value) return false;
                 return scanPreview.value.previews.length > 0 && scanPreview.value.previews.every(p => p.selected);
             });
-
-            const allMediaSelected = computed(() => {
-                if (filteredMedia.value.length === 0) return false;
-                return filteredMedia.value.every(m => selectedMediaIds.value.includes(m.id));
-            });
-
+            
             const showToast = (msg) => { toast.value = msg; setTimeout(() => toast.value = '', 3000); };
             
             const api = async (method, url, body) => {
@@ -3106,10 +2936,10 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             };
             
             const deleteMedia = async (id) => {
-                if (confirm('Remove this media from Subarr?\\n\\nThis only removes the entry from Subarr - your actual video files will NOT be deleted from disk.')) {
+                if (confirm('Delete this media entry and all its file records?')) {
                     await api('DELETE', `/api/media/${id}`);
                     selectedMedia.value = null;
-                    showToast('Removed from Subarr');
+                    showToast('Deleted');
                     await refresh();
                 }
             };
@@ -3159,9 +2989,9 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             };
             
             const removeLibrary = async (id) => {
-                if (confirm('Remove this library from Subarr?\\n\\nThis will remove the library and ALL associated media entries from Subarr.\\n\\nYour actual video files will NOT be deleted from disk.')) {
+                if (confirm('Remove this library? This will also delete ALL media and file records associated with it.')) {
                     await api('DELETE', `/api/libraries/${id}`);
-                    showToast('Library removed from Subarr');
+                    showToast('Library and associated media removed');
                     await refresh();
                 }
             };
@@ -3232,7 +3062,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 if (!confirm(`⚠️ Experimental Feature\n\nFFSubsync will attempt to re-align subtitle timing for:\n${filename || 'this file'}\n\nWarning: This may make timing WORSE on some files. The original timing from Whisper is usually accurate.\n\nContinue?`)) {
                     return;
                 }
-
+                
                 try {
                     const result = await api('POST', `/api/files/${fileId}/resync`);
                     showToast(`Sync started: ${result.file}`);
@@ -3240,99 +3070,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     showToast('Sync failed: ' + (e.message || 'Unknown error'));
                 }
             };
-
-            // Manage mode functions
-            const toggleSelect = (id) => {
-                const idx = selectedIds.value.indexOf(id);
-                if (idx === -1) {
-                    selectedIds.value.push(id);
-                } else {
-                    selectedIds.value.splice(idx, 1);
-                }
-            };
-
-            const toggleSelectAll = () => {
-                if (selectedIds.value.length === filteredMedia.value.length) {
-                    selectedIds.value = [];
-                } else {
-                    selectedIds.value = filteredMedia.value.map(m => m.id);
-                }
-            };
-
-            const bulkRescan = async () => {
-                if (selectedIds.value.length === 0) return;
-                showToast('Rescanning ' + selectedIds.value.length + ' items...');
-                const result = await api('POST', '/api/media/bulk-rescan', { media_ids: selectedIds.value });
-                showToast('Rescanned ' + result.rescanned + ' items, found ' + result.new_files + ' new files');
-                selectedIds.value = [];
-                manageMode.value = false;
-                await refresh();
-            };
-
-            const bulkQueue = async () => {
-                if (selectedIds.value.length === 0) return;
-                if (!confirm('Queue all files for ' + selectedIds.value.length + ' items? This includes already-completed files.')) return;
-                const result = await api('POST', '/api/media/bulk-queue', { media_ids: selectedIds.value });
-                showToast(result.total_queued + ' files queued');
-                selectedIds.value = [];
-                manageMode.value = false;
-                await refresh();
-            };
-
-            const bulkDelete = async () => {
-                if (selectedIds.value.length === 0) return;
-                if (!confirm('Remove ' + selectedIds.value.length + ' items from Subarr?\\n\\nThis only removes entries from Subarr - your actual video files will NOT be deleted from disk.')) return;
-                const result = await api('POST', '/api/media/bulk-delete', { media_ids: selectedIds.value });
-                showToast('Removed ' + result.deleted + ' items from Subarr');
-                selectedIds.value = [];
-                manageMode.value = false;
-                await refresh();
-            };
-
-            // Fix Match functions
-            const openFixMatch = (mediaItem) => {
-                fixMatchMedia.value = mediaItem;
-                fixMatchQuery.value = mediaItem.title || '';
-                fixMatchResults.value = [];
-                fixMatchSelected.value = null;
-                fixMatchUpdateProfile.value = true;
-                fixMatchShow.value = true;
-                if (fixMatchQuery.value) {
-                    searchForMatch();
-                }
-            };
-
-            const searchForMatch = async () => {
-                if (!fixMatchQuery.value.trim()) return;
-                fixMatchSearching.value = true;
-                try {
-                    const results = await api('GET', '/api/tmdb/search/multi?query=' + encodeURIComponent(fixMatchQuery.value));
-                    fixMatchResults.value = results.slice(0, 10);
-                } catch (e) {
-                    showToast('Search failed');
-                }
-                fixMatchSearching.value = false;
-            };
-
-            const applyFixMatch = async () => {
-                if (!fixMatchSelected.value || !fixMatchMedia.value) return;
-                fixMatchApplying.value = true;
-                try {
-                    const result = await api('PUT', '/api/media/' + fixMatchMedia.value.id + '/fix-match', {
-                        tmdb_id: fixMatchSelected.value.tmdb_id,
-                        media_type: fixMatchSelected.value.media_type,
-                        update_profile: fixMatchUpdateProfile.value
-                    });
-                    showToast('Updated to "' + result.title + '" - poster and metadata refreshed');
-                    fixMatchShow.value = false;
-                    selectedMedia.value = null;
-                    await refresh();
-                } catch (e) {
-                    showToast('Failed to update match');
-                }
-                fixMatchApplying.value = false;
-            };
-
+            
             // Close dropdown when clicking outside
             document.addEventListener('click', (e) => {
                 if (!e.target.closest('.dropdown-menu') && !e.target.closest('button')) {
@@ -3355,16 +3093,11 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 mediaLibFilter, selectedMedia, mediaFiles, filteredMedia,
                 showBrowser, browserPath, browserParent, browserItems, browseTarget,
                 selectedCount, allSelected,
-                manageMode, selectedIds,
-                fixMatchShow, fixMatchMedia, fixMatchQuery, fixMatchResults, fixMatchSelected,
-                fixMatchSearching, fixMatchUpdateProfile, fixMatchApplying,
                 showFiles, loadFiles, scanLibraryPreview, selectAllPreviews, importSelected,
                 searchTMDB, selectResult, importMedia, scanMedia, deleteMedia, updateProfile,
                 openMediaDetail, queueFile, queueAllMediaFiles,
                 addLibrary, removeLibrary, toggleLibraryMenu, updateLibrarySettings,
-                browseTo, selectBrowserPath, cancelProcessing, retryFile, retryAllFailed, requeueSkipped, clearPending, resyncFile,
-                toggleSelect, toggleSelectAll, bulkRescan, bulkQueue, bulkDelete,
-                openFixMatch, searchForMatch, applyFixMatch
+                browseTo, selectBrowserPath, cancelProcessing, retryFile, retryAllFailed, requeueSkipped, clearPending, resyncFile
             };
         }
     }).mount('#app');
@@ -3843,88 +3576,6 @@ async def scan_media_files(media_id: int):
 async def delete_media(media_id: int):
     db.delete_media(media_id)
     return {"status": "deleted"}
-
-@app.put("/api/media/{media_id}/fix-match")
-async def fix_media_match(
-    media_id: int,
-    tmdb_id: int = Body(...),
-    media_type: str = Body(...),
-    update_profile: bool = Body(True)
-):
-    """Update media with a new TMDB match - fixes poster and metadata"""
-    media = db.get_media_by_id(media_id)
-    if not media:
-        raise HTTPException(404, "Media not found")
-
-    # Get full details from TMDB
-    if media_type == "tv":
-        details = tmdb.get_tv_details(tmdb_id)
-    else:
-        details = tmdb.get_movie_details(tmdb_id)
-
-    if not details:
-        raise HTTPException(404, "TMDB entry not found")
-
-    # Detect profile if requested
-    new_profile = tmdb.detect_profile(details) if update_profile else None
-
-    # Update the media entry
-    db.update_media_match(
-        media_id=media_id,
-        tmdb_id=tmdb_id,
-        media_type=media_type,
-        title=details["title"],
-        year=int(details["year"]) if details.get("year") else None,
-        genres=details.get("genres", []),
-        origin_country=details.get("origin_country", []),
-        poster_path=details.get("poster_path"),
-        profile=new_profile
-    )
-
-    return {
-        "status": "updated",
-        "title": details["title"],
-        "year": details.get("year"),
-        "poster_path": details.get("poster_path"),
-        "profile": new_profile if new_profile else media.get("profile"),
-        "tmdb_id": tmdb_id
-    }
-
-@app.post("/api/media/bulk-delete")
-async def bulk_delete_media(media_ids: List[int] = Body(..., embed=True)):
-    """Delete multiple media entries. Only removes from database, not actual files."""
-    if not media_ids:
-        return {"status": "no_items", "deleted": 0}
-    count = db.delete_media_bulk(media_ids)
-    return {"status": "deleted", "deleted": count}
-
-@app.post("/api/media/bulk-rescan")
-async def bulk_rescan_media(media_ids: List[int] = Body(..., embed=True)):
-    """Rescan multiple media entries for new files"""
-    if not media_ids:
-        return {"status": "no_items", "rescanned": 0, "new_files": 0}
-    total_new = 0
-    rescanned = 0
-    for mid in media_ids:
-        media = db.get_media_by_id(mid)
-        if media:
-            result = scanner.scan_media_files(mid)
-            total_new += result.get("new", 0)
-            rescanned += 1
-    return {"status": "rescanned", "rescanned": rescanned, "new_files": total_new}
-
-@app.post("/api/media/bulk-queue")
-async def bulk_queue_media(media_ids: List[int] = Body(..., embed=True)):
-    """Queue all files for multiple media entries"""
-    if not media_ids:
-        return {"status": "no_items", "queued": 0}
-    total_queued = 0
-    for mid in media_ids:
-        media = db.get_media_by_id(mid)
-        if media:
-            count = db.queue_media_files(mid)
-            total_queued += count
-    return {"status": "queued", "total_queued": total_queued}
 
 @app.post("/api/process")
 async def trigger_processing(limit: int = Query(1, ge=1, le=10)):
