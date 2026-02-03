@@ -3906,9 +3906,30 @@ async def tmdb_match_search(media_id: int, query: str):
             ]
         }
 
-    matches = tmdb.search_multi(query_value)
     media_type = media.get("media_type")
-    if media_type in ("movie", "tv"):
+    folder_name = os.path.basename(media.get("folder_path", "")) or media.get("title", "")
+    _, folder_year = MediaParser.parse_folder_name(folder_name)
+    parsed_title, parsed_year = MediaParser.parse_folder_name(query_value)
+    search_title = parsed_title if parsed_title else query_value
+    search_year = parsed_year or folder_year
+
+    matches = tmdb.search_multi(search_title, search_year)
+    if not matches and search_year:
+        matches = tmdb.search_multi(search_title)
+
+    if media_type == "movie":
+        movie_matches = tmdb.search_movie(search_title, search_year)
+        if not movie_matches and search_year:
+            movie_matches = tmdb.search_movie(search_title)
+        if movie_matches:
+            matches = movie_matches
+    elif media_type == "tv":
+        tv_matches = tmdb.search_tv(search_title, search_year)
+        if not tv_matches and search_year:
+            tv_matches = tmdb.search_tv(search_title)
+        if tv_matches:
+            matches = tv_matches
+    elif media_type in ("movie", "tv"):
         matches = [m for m in matches if m.get("media_type") == media_type]
 
     return {"media_id": media_id, "matches": matches}
