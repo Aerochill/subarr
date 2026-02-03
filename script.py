@@ -3682,26 +3682,6 @@ async def list_media_by_library(library_id: int):
         m["origin_country"] = json.loads(m["origin_country"]) if m["origin_country"] else []
     return media_list
 
-@app.get("/api/media/{media_id}/files")
-async def get_media_files(media_id: int):
-    """Get all files for a specific media entry"""
-    media = db.get_media_by_id(media_id)
-    if not media:
-        raise HTTPException(404, "Media not found")
-    files = db.get_media_files(media_id)
-    return {
-        "media": {
-            "id": media["id"],
-            "title": media["title"],
-            "year": media.get("year"),
-            "profile": media["profile"],
-            "poster_path": media.get("poster_path"),
-            "media_type": media.get("media_type", "movie"),
-            "tmdb_id": media.get("tmdb_id"),
-        },
-        "files": files
-    }
-
 @app.post("/api/media/{media_id}/queue")
 async def queue_media(media_id: int):
     """Queue ALL files for a media entry (even completed ones)"""
@@ -3710,14 +3690,6 @@ async def queue_media(media_id: int):
         raise HTTPException(404, "Media not found")
     count = db.queue_media_files(media_id)
     return {"status": "queued", "count": count, "title": media["title"]}
-
-@app.post("/api/files/{file_id}/queue")
-async def queue_single_file(file_id: int):
-    """Queue a single file for processing (works regardless of current status)"""
-    success = db.queue_file(file_id)
-    if not success:
-        raise HTTPException(404, "File not found")
-    return {"status": "queued", "file_id": file_id}
 
 @app.post("/api/media/import")
 async def import_media(
