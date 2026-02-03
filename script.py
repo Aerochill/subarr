@@ -745,6 +745,50 @@ class DatabaseManager:
             conn.commit()
         finally:
             conn.close()
+
+    def update_media_match(
+        self,
+        media_id: int,
+        tmdb_id: int,
+        media_type: str,
+        title: str,
+        year: Optional[int],
+        genres: List,
+        origin_country: List,
+        profile: str,
+        poster_path: Optional[str] = None,
+    ):
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """
+                UPDATE media
+                SET tmdb_id = ?,
+                    media_type = ?,
+                    title = ?,
+                    year = ?,
+                    genres = ?,
+                    origin_country = ?,
+                    profile = ?,
+                    poster_path = COALESCE(?, poster_path),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    tmdb_id,
+                    media_type,
+                    title,
+                    year,
+                    json.dumps(genres),
+                    json.dumps(origin_country),
+                    profile,
+                    poster_path,
+                    media_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     
     def delete_media(self, media_id: int):
         conn = self._get_conn()
@@ -2370,6 +2414,21 @@ WEB_UI_HTML = '''<!DOCTYPE html>
 
         <!-- ==================== HOME TAB ==================== -->
         <div v-if="tab === 'home'">
+            <!-- Manage Content -->
+            <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+                <label class="flex items-center gap-2 text-sm text-gray-300">
+                    <input type="checkbox" v-model="manageContent" @change="resetSelectionOnToggle" class="rounded">
+                    Manage content
+                </label>
+                <div v-if="manageContent" class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs text-gray-400">Selected {{ selectedMediaCount }}</span>
+                    <button @click="selectAllVisible" class="btn-secondary px-3 py-1 rounded text-sm">Select All</button>
+                    <button @click="clearSelectedMedia" class="btn-secondary px-3 py-1 rounded text-sm">Clear</button>
+                    <button @click="fixMatchSelected" class="btn-primary px-3 py-1 rounded text-sm">🔎 Fix Match</button>
+                    <button @click="rescanSelected" class="btn-secondary px-3 py-1 rounded text-sm">🔄 Rescan</button>
+                    <button @click="deleteSelectedMedia" class="btn-danger px-3 py-1 rounded text-sm">🗑 Delete</button>
+                </div>
+            </div>
             <!-- Library Filter Tabs -->
             <div class="flex items-center gap-2 mb-4 flex-wrap">
                 <button @click="mediaLibFilter = 'all'" 
@@ -2384,8 +2443,9 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             <!-- Poster Grid -->
             <div v-if="filteredMedia.length > 0" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">
                 <div v-for="m in filteredMedia" :key="m.id" 
-                     @click="openMediaDetail(m)"
-                     class="poster-card cursor-pointer card">
+                     @click="handleMediaClick(m)"
+                     class="poster-card cursor-pointer card"
+                     :class="manageContent && isSelected(m.id) ? 'ring-2 ring-blue-400' : ''">
                     <div class="poster-wrap">
                         <img v-if="m.poster_path" 
                              :src="'https://image.tmdb.org/t/p/w300' + m.poster_path" 
@@ -2396,7 +2456,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     </div>
                     
                     <!-- Status badge -->
-                    <div class="absolute top-1 right-1">
+                    <div class="absolute top-1" :class="manageContent ? 'right-8' : 'right-1'">
                         <span v-if="m.file_count > 0 && m.completed_count >= m.file_count" 
                               class="bg-green-600 text-white text-xs px-1.5 py-0.5 rounded font-bold">✓</span>
                         <span v-else-if="m.processing_count > 0" 
@@ -2405,6 +2465,10 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                               class="bg-yellow-600 text-white text-xs px-1.5 py-0.5 rounded">{{ m.pending_count }}</span>
                         <span v-else-if="m.failed_count > 0" 
                               class="bg-red-600 text-white text-xs px-1.5 py-0.5 rounded">!</span>
+                    </div>
+
+                    <div v-if="manageContent" class="absolute top-1 right-1">
+                        <input type="checkbox" :checked="isSelected(m.id)" @click.stop="toggleMediaSelection(m.id)" class="rounded">
                     </div>
                     
                     <!-- Profile badge -->
@@ -2651,6 +2715,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                         <div class="flex gap-2 mt-3 flex-wrap">
                             <button @click="queueAllMediaFiles(selectedMedia.id)" class="btn-primary px-3 py-1 rounded text-sm">⏳ Queue All</button>
                             <button @click="scanMedia(selectedMedia.id)" class="btn-secondary px-3 py-1 rounded text-sm">🔄 Rescan</button>
+                            <button @click="fixMatchMedia(selectedMedia.id)" class="btn-secondary px-3 py-1 rounded text-sm">🔎 Fix Match</button>
                             <select :value="selectedMedia.profile" @change="updateProfile(selectedMedia.id, $event.target.value)" class="bg-gray-700 rounded px-2 py-1 text-sm">
                                 <option v-for="(pr, key) in profiles" :value="key">{{ key }}</option>
                             </select>
@@ -2780,6 +2845,8 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             const mediaLibFilter = ref('all');
             const selectedMedia = ref(null);
             const mediaFiles = ref([]);
+            const manageContent = ref(false);
+            const selectedMediaIds = ref([]);
             
             // File browser
             const showBrowser = ref(false);
@@ -2798,6 +2865,8 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 if (!scanPreview.value) return 0;
                 return scanPreview.value.previews.filter(p => p.selected).length;
             });
+
+            const selectedMediaCount = computed(() => selectedMediaIds.value.length);
             
             const allSelected = computed(() => {
                 if (!scanPreview.value) return false;
@@ -2934,9 +3003,27 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                     await openMediaDetail(selectedMedia.value);
                 }
             };
+
+            const fixMatchMedia = async (id) => {
+                showToast('Searching TMDB for best match...');
+                try {
+                    const result = await api('POST', `/api/media/${id}/fix-match`);
+                    showToast(`Matched ${result.title}`);
+                    await refresh();
+                    if (selectedMedia.value && selectedMedia.value.id === id) {
+                        const updated = media.value.find(m => m.id === id);
+                        if (updated) {
+                            selectedMedia.value = updated;
+                        }
+                        await openMediaDetail(selectedMedia.value);
+                    }
+                } catch (e) {
+                    showToast('No TMDB match found');
+                }
+            };
             
             const deleteMedia = async (id) => {
-                if (confirm('Delete this media entry and all its file records?')) {
+                if (confirm('Delete this media entry and all its file records from Subarr? This will not remove any files from disk.')) {
                     await api('DELETE', `/api/media/${id}`);
                     selectedMedia.value = null;
                     showToast('Deleted');
@@ -2952,6 +3039,84 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 } catch (e) {
                     mediaFiles.value = [];
                 }
+            };
+
+            const isSelected = (id) => selectedMediaIds.value.includes(id);
+
+            const toggleMediaSelection = (id) => {
+                if (isSelected(id)) {
+                    selectedMediaIds.value = selectedMediaIds.value.filter(item => item !== id);
+                } else {
+                    selectedMediaIds.value = [...selectedMediaIds.value, id];
+                }
+            };
+
+            const handleMediaClick = async (m) => {
+                if (manageContent.value) {
+                    toggleMediaSelection(m.id);
+                } else {
+                    await openMediaDetail(m);
+                }
+            };
+
+            const selectAllVisible = () => {
+                selectedMediaIds.value = filteredMedia.value.map(item => item.id);
+            };
+
+            const clearSelectedMedia = () => {
+                selectedMediaIds.value = [];
+            };
+
+            const resetSelectionOnToggle = () => {
+                if (!manageContent.value) {
+                    clearSelectedMedia();
+                }
+            };
+
+            const fixMatchSelected = async () => {
+                if (selectedMediaIds.value.length === 0) {
+                    showToast('No media selected');
+                    return;
+                }
+                showToast(`Fixing matches for ${selectedMediaIds.value.length} items...`);
+                let matched = 0;
+                for (const id of selectedMediaIds.value) {
+                    try {
+                        await api('POST', `/api/media/${id}/fix-match`);
+                        matched += 1;
+                    } catch (e) {
+                        // Ignore individual failures
+                    }
+                }
+                showToast(`Updated ${matched} matches`);
+                await refresh();
+            };
+
+            const rescanSelected = async () => {
+                if (selectedMediaIds.value.length === 0) {
+                    showToast('No media selected');
+                    return;
+                }
+                if (!confirm(`Rescan ${selectedMediaIds.value.length} selected item(s)?`)) return;
+                for (const id of selectedMediaIds.value) {
+                    await api('POST', `/api/media/${id}/scan`);
+                }
+                showToast('Rescan started');
+                await refresh();
+            };
+
+            const deleteSelectedMedia = async () => {
+                if (selectedMediaIds.value.length === 0) {
+                    showToast('No media selected');
+                    return;
+                }
+                if (!confirm(`Delete ${selectedMediaIds.value.length} selected item(s) from Subarr? This will not remove any files from disk.`)) return;
+                for (const id of selectedMediaIds.value) {
+                    await api('DELETE', `/api/media/${id}`);
+                }
+                clearSelectedMedia();
+                showToast('Deleted selected media');
+                await refresh();
             };
             
             const queueFile = async (fileId) => {
@@ -2989,7 +3154,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
             };
             
             const removeLibrary = async (id) => {
-                if (confirm('Remove this library? This will also delete ALL media and file records associated with it.')) {
+                if (confirm('Remove this library from Subarr? This will delete ALL media and file records associated with it, but will not remove any files from disk.')) {
                     await api('DELETE', `/api/libraries/${id}`);
                     showToast('Library and associated media removed');
                     await refresh();
@@ -3090,12 +3255,14 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 selectedLibrary, scanning, scanPreview, importResult,
                 searchQuery, searchResults, selectedResult, suggestedProfile, importPath, importProfile,
                 newLibraryPath, openLibraryMenu,
-                mediaLibFilter, selectedMedia, mediaFiles, filteredMedia,
+                mediaLibFilter, selectedMedia, mediaFiles, filteredMedia, manageContent, selectedMediaIds,
                 showBrowser, browserPath, browserParent, browserItems, browseTarget,
-                selectedCount, allSelected,
+                selectedCount, allSelected, selectedMediaCount,
                 showFiles, loadFiles, scanLibraryPreview, selectAllPreviews, importSelected,
-                searchTMDB, selectResult, importMedia, scanMedia, deleteMedia, updateProfile,
-                openMediaDetail, queueFile, queueAllMediaFiles,
+                searchTMDB, selectResult, importMedia, scanMedia, fixMatchMedia, deleteMedia, updateProfile,
+                openMediaDetail, handleMediaClick, isSelected, toggleMediaSelection,
+                selectAllVisible, clearSelectedMedia, resetSelectionOnToggle,
+                fixMatchSelected, rescanSelected, deleteSelectedMedia, queueFile, queueAllMediaFiles,
                 addLibrary, removeLibrary, toggleLibraryMenu, updateLibrarySettings,
                 browseTo, selectBrowserPath, cancelProcessing, retryFile, retryAllFailed, requeueSkipped, clearPending, resyncFile
             };
@@ -3567,6 +3734,72 @@ async def update_media_profile(media_id: int, profile: str = Body(..., embed=Tru
     
     db.update_media_profile(media_id, profile)
     return {"status": "updated", "profile": profile}
+
+@app.post("/api/media/{media_id}/fix-match")
+async def fix_media_match(media_id: int):
+    media = db.get_media_by_id(media_id)
+    if not media:
+        raise HTTPException(404, "Media not found")
+
+    title = media.get("title") or os.path.basename(media.get("folder_path", ""))
+    year = media.get("year")
+    media_type = media.get("media_type", "movie")
+
+    clean_title = tmdb.clean_search_query(title)
+    results = tmdb.search_multi(clean_title, year)
+    if not results and year:
+        results = tmdb.search_multi(clean_title)
+    if not results and clean_title != title:
+        results = tmdb.search_multi(title, year)
+    if not results:
+        if media_type == "tv":
+            results = tmdb.search_tv(clean_title, year) or tmdb.search_tv(clean_title)
+        else:
+            results = tmdb.search_movie(clean_title, year) or tmdb.search_movie(clean_title)
+
+    if not results:
+        raise HTTPException(404, "No TMDB match found")
+
+    def match_score(item: Dict[str, Any]) -> Tuple[int, int]:
+        type_match = 0 if item.get("media_type") == media_type else 1
+        year_match = 0 if year and str(year) == str(item.get("year")) else 1
+        return (type_match, year_match)
+
+    results.sort(key=match_score)
+    match = results[0]
+    tmdb_id = match["tmdb_id"]
+    matched_type = match.get("media_type", media_type)
+
+    if matched_type == "tv":
+        details = tmdb.get_tv_details(tmdb_id)
+    else:
+        details = tmdb.get_movie_details(tmdb_id)
+
+    if not details:
+        raise HTTPException(404, "TMDB entry not found")
+
+    profile = tmdb.detect_profile(details)
+    db.update_media_match(
+        media_id=media_id,
+        tmdb_id=tmdb_id,
+        media_type=matched_type,
+        title=details["title"],
+        year=int(details["year"]) if details.get("year") else None,
+        genres=details.get("genres", []),
+        origin_country=details.get("origin_country", []),
+        profile=profile,
+        poster_path=details.get("poster_path"),
+    )
+
+    return {
+        "status": "matched",
+        "media_id": media_id,
+        "tmdb_id": tmdb_id,
+        "title": details["title"],
+        "profile": profile,
+        "poster_path": details.get("poster_path"),
+        "media_type": matched_type,
+    }
 
 @app.post("/api/media/{media_id}/scan")
 async def scan_media_files(media_id: int):
