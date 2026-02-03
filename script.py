@@ -3870,6 +3870,7 @@ async def apply_tmdb_match(
 
 @app.post("/api/media/batch-rescan")
 async def batch_rescan(payload: Dict = Body(...)):
+    """Rescan media folders, remove missing file records, and refresh TMDB metadata."""
     media_ids = payload.get("media_ids", [])
     rescanned = 0
     results = []
@@ -3926,6 +3927,7 @@ async def batch_delete(payload: Dict = Body(...)):
 
 @app.post("/api/media/{media_id}/scan")
 async def scan_media_files(media_id: int):
+    """Rescan a media folder, prune missing files, and refresh TMDB metadata."""
     media = db.get_media_by_id(media_id)
     if not media:
         raise HTTPException(404, "Media not found")
