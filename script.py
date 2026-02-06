@@ -456,6 +456,7 @@ class DatabaseManager:
                     genres TEXT,
                     origin_country TEXT,
                     profile TEXT NOT NULL,
+                    priority INTEGER DEFAULT 0,
                     folder_path TEXT NOT NULL UNIQUE,
                     monitored INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -469,6 +470,7 @@ class DatabaseManager:
                     file_size INTEGER,
                     status TEXT DEFAULT 'pending',
                     progress REAL DEFAULT 0,
+                    priority INTEGER DEFAULT 0,
                     subtitle_path TEXT,
                     error_message TEXT,
                     processed_at TIMESTAMP,
@@ -505,6 +507,10 @@ class DatabaseManager:
             if "progress" not in file_columns:
                 conn.execute("ALTER TABLE files ADD COLUMN progress REAL DEFAULT 0")
                 log("Migration: Added 'progress' column to files table")
+
+            if "priority" not in file_columns:
+                conn.execute("ALTER TABLE files ADD COLUMN priority INTEGER DEFAULT 0")
+                log("Migration: Added 'priority' column to files table")
             
             # Check and add missing columns to libraries table
             cursor = conn.execute("PRAGMA table_info(libraries)")
@@ -529,6 +535,10 @@ class DatabaseManager:
             if "poster_path" not in media_columns:
                 conn.execute("ALTER TABLE media ADD COLUMN poster_path TEXT")
                 log("Migration: Added 'poster_path' column to media table")
+
+            if "priority" not in media_columns:
+                conn.execute("ALTER TABLE media ADD COLUMN priority INTEGER DEFAULT 0")
+                log("Migration: Added 'priority' column to media table")
             
             if "library_id" not in media_columns:
                 conn.execute("ALTER TABLE media ADD COLUMN library_id INTEGER")
@@ -622,12 +632,12 @@ class DatabaseManager:
     
     def add_media(self, tmdb_id: int, media_type: str, title: str, year: Optional[int],
                   genres: List, origin_country: List, profile: str, folder_path: str,
-                  poster_path: str = None, library_id: int = None) -> int:
+                  poster_path: str = None, library_id: int = None, priority: int = 0) -> int:
         conn = self._get_conn()
         try:
             cursor = conn.execute("""
-                INSERT INTO media (tmdb_id, media_type, title, year, genres, origin_country, profile, folder_path, poster_path, library_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO media (tmdb_id, media_type, title, year, genres, origin_country, profile, folder_path, poster_path, library_id, priority)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(folder_path) DO UPDATE SET
                     tmdb_id = excluded.tmdb_id,
                     title = excluded.title,
@@ -637,8 +647,9 @@ class DatabaseManager:
                     profile = excluded.profile,
                     poster_path = COALESCE(excluded.poster_path, poster_path),
                     library_id = COALESCE(excluded.library_id, library_id),
+                    priority = COALESCE(excluded.priority, priority),
                     updated_at = CURRENT_TIMESTAMP
-            """, (tmdb_id, media_type, title, year, json.dumps(genres), json.dumps(origin_country), profile, folder_path, poster_path, library_id))
+            """, (tmdb_id, media_type, title, year, json.dumps(genres), json.dumps(origin_country), profile, folder_path, poster_path, library_id, priority))
             conn.commit()
             return cursor.lastrowid
         finally:
@@ -762,6 +773,23 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def update_media_priority(self, media_id: int, priority: int):
+        conn = self._get_conn()
+        try:
+            conn.execute("UPDATE media SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (priority, media_id))
+            conn.execute("UPDATE files SET priority = ? WHERE media_id = ?", (priority, media_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_file_priority(self, file_id: int, priority: int):
+        conn = self._get_conn()
+        try:
+            conn.execute("UPDATE files SET priority = ? WHERE id = ?", (priority, file_id))
+            conn.commit()
+        finally:
+            conn.close()
+
     def update_media_metadata(
         self,
         media_id: int,
@@ -846,14 +874,16 @@ class DatabaseManager:
         finally:
             conn.close()
     
-    def add_file(self, media_id: int, file_path: str, file_size: int) -> int:
+    def add_file(self, media_id: int, file_path: str, file_size: int, priority: int = 0) -> int:
         conn = self._get_conn()
         try:
             cursor = conn.execute("""
-                INSERT INTO files (media_id, file_path, file_size, status)
-                VALUES (?, ?, ?, 'pending')
-                ON CONFLICT(file_path) DO UPDATE SET file_size = excluded.file_size
-            """, (media_id, file_path, file_size))
+                INSERT INTO files (media_id, file_path, file_size, status, priority)
+                VALUES (?, ?, ?, 'pending', ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    file_size = excluded.file_size,
+                    priority = excluded.priority
+            """, (media_id, file_path, file_size, priority))
             conn.commit()
             return cursor.lastrowid
         finally:
@@ -876,7 +906,7 @@ class DatabaseManager:
                 FROM files f
                 JOIN media m ON f.media_id = m.id
                 WHERE f.status = 'pending' AND m.monitored = 1
-                ORDER BY f.created_at
+                ORDER BY f.priority DESC, f.created_at
                 LIMIT ?
             """, (limit,)).fetchall()
             return [dict(row) for row in rows]
@@ -1973,6 +2003,8 @@ class LibraryScanner:
         # Patterns to exclude (temp files, samples, etc.)
         exclude_patterns = ['_muxtemp', '_muxed', '.sample', '.sample.', '_temp', '.part']
         
+        media_priority = media.get("priority", 0)
+
         for root, dirs, files in os.walk(folder_path):
             for filename in files:
                 if not filename.lower().endswith(VIDEO_EXTENSIONS):
@@ -1991,13 +2023,13 @@ class LibraryScanner:
                     continue
                 
                 if has_ai_subtitle(file_path):
-                    self.db.add_file(media_id, file_path, os.path.getsize(file_path))
+                    self.db.add_file(media_id, file_path, os.path.getsize(file_path), media_priority)
                     self.db.update_file_status(file_path, "completed")
                     found["skipped"] += 1
                     continue
                 
                 file_size = os.path.getsize(file_path)
-                self.db.add_file(media_id, file_path, file_size)
+                self.db.add_file(media_id, file_path, file_size, media_priority)
                 found["new"] += 1
         
         return found
@@ -2778,7 +2810,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                                         @click="resyncFile(f.id, f.file_path.split('/').pop())" 
                                         class="bg-purple-600 hover:bg-purple-500 px-2 py-1 rounded text-xs opacity-75 hover:opacity-100"
                                         title="Experimental: Try ffsubsync">Sync</button>
-                                <button v-if="f.status === 'failed' || f.status === 'skipped'" 
+                                <button v-if="f.status === 'failed'" 
                                         @click="retryFile(f.id)" 
                                         class="btn-primary px-2 py-1 rounded text-xs">Retry</button>
                             </div>
@@ -2805,12 +2837,18 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                             <span class="uppercase">{{ selectedMedia.media_type }}</span> • 
                             <span :class="'profile-' + selectedMedia.profile" class="text-xs px-1.5 py-0.5 rounded">{{ selectedMedia.profile }}</span>
                         </p>
-                        <div class="flex gap-3 mt-2 text-xs">
-                            <span class="text-green-400">✓ {{ selectedMedia.completed_count || 0 }}</span>
-                            <span class="text-yellow-400">⏳ {{ selectedMedia.pending_count || 0 }}</span>
-                            <span class="text-red-400">✗ {{ selectedMedia.failed_count || 0 }}</span>
-                    <span class="text-gray-400">{{ (selectedMedia.file_count || 0) }} total</span>
-                </div>
+                    <div class="flex gap-3 mt-2 text-xs">
+                        <span class="text-green-400">✓ {{ selectedMedia.completed_count || 0 }}</span>
+                        <span class="text-yellow-400">⏳ {{ selectedMedia.pending_count || 0 }}</span>
+                        <span class="text-red-400">✗ {{ selectedMedia.failed_count || 0 }}</span>
+                        <span class="text-gray-400">{{ (selectedMedia.file_count || 0) }} total</span>
+                    </div>
+                    <div class="flex items-center gap-2 mt-2 text-xs text-gray-400">
+                        <span>Priority</span>
+                        <input type="number" min="0" class="bg-gray-700 rounded px-2 py-1 text-xs w-20"
+                               :value="selectedMedia.priority || 0"
+                               @change="updateMediaPriority(selectedMedia.id, $event.target.value)">
+                    </div>
                         <div class="flex gap-2 mt-3 flex-wrap">
                             <button @click="queueAllMediaFiles(selectedMedia.id)" class="btn-primary px-3 py-1 rounded text-sm">⏳ Queue All</button>
                             <button @click="scanMedia(selectedMedia.id)" class="btn-secondary px-3 py-1 rounded text-sm">🔄 Rescan</button>
@@ -2828,6 +2866,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 <div v-if="mediaFiles.length > 0" class="px-5 py-2 border-b border-gray-800 text-xs text-gray-500 flex items-center">
                     <span class="flex-1">{{ mediaFiles.length }} file{{ mediaFiles.length !== 1 ? 's' : '' }}</span>
                     <span class="w-20 text-center">Status</span>
+                    <span class="w-16 text-center">Priority</span>
                     <span class="w-16 text-center">Action</span>
                 </div>
                 
@@ -2866,6 +2905,10 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                             'text-red-400': f.status === 'failed',
                             'text-gray-400': f.status === 'skipped'
                         }">{{ f.status }}</span>
+
+                        <input type="number" min="0" class="w-16 bg-gray-700 rounded px-2 py-1 text-xs text-center"
+                               :value="f.priority || 0"
+                               @change="updateFilePriority(f.id, $event.target.value)">
                         
                         <!-- Action button -->
                         <button @click.stop="queueFile(f.id)" 
@@ -3220,6 +3263,23 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 await refresh();
             };
 
+            const updateMediaPriority = async (id, priority) => {
+                const value = Math.max(0, parseInt(priority || 0, 10));
+                await api('PUT', `/api/media/${id}/priority`, { priority: value });
+                showToast(`Priority updated to ${value}`);
+                await refresh();
+            };
+
+            const updateFilePriority = async (id, priority) => {
+                const value = Math.max(0, parseInt(priority || 0, 10));
+                await api('PUT', `/api/files/${id}/priority`, { priority: value });
+                showToast(`File priority updated to ${value}`);
+                if (selectedMedia.value) {
+                    await openMediaDetail(selectedMedia.value);
+                }
+                await refresh();
+            };
+
             const fixMatch = async (id) => {
                 fixMatchMedia.value = media.value.find(item => item.id === id) || selectedMedia.value;
                 showFixMatchModal.value = true;
@@ -3412,6 +3472,7 @@ WEB_UI_HTML = '''<!DOCTYPE html>
                 openMediaDetail, queueFile, queueAllMediaFiles, handleMediaClick, fixMatch,
                 fixMatchSelected, rescanSelected, deleteSelected, applyFixMatch, searchFixMatch, closeFixMatch,
                 toggleSelectAll,
+                updateMediaPriority, updateFilePriority,
                 addLibrary, removeLibrary, toggleLibraryMenu, updateLibrarySettings,
                 browseTo, selectBrowserPath, cancelProcessing, retryFile, retryAllFailed, clearPending, resyncFile
             };
@@ -3806,6 +3867,7 @@ async def get_media_files(media_id: int):
             "year": media.get("year"),
             "media_type": media.get("media_type"),
             "profile": media.get("profile"),
+            "priority": media.get("priority", 0),
             "poster_path": media.get("poster_path"),
             "tmdb_id": media.get("tmdb_id")
         },
@@ -3829,6 +3891,19 @@ async def queue_file(file_id: int):
         return {"status": "queued", "file_id": file_id, "filename": os.path.basename(row["file_path"])}
     finally:
         conn.close()
+
+@app.put("/api/files/{file_id}/priority")
+async def update_file_priority(file_id: int, priority: int = Body(..., embed=True)):
+    conn = db._get_conn()
+    try:
+        row = conn.execute("SELECT id FROM files WHERE id = ?", (file_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "File not found")
+    finally:
+        conn.close()
+    value = max(0, int(priority))
+    db.update_file_priority(file_id, value)
+    return {"status": "updated", "priority": value}
 
 @app.post("/api/media/{media_id}/queue-all")
 async def queue_all_media_files(media_id: int):
@@ -3856,6 +3931,15 @@ async def update_media_profile(media_id: int, profile: str = Body(..., embed=Tru
     
     db.update_media_profile(media_id, profile)
     return {"status": "updated", "profile": profile}
+
+@app.put("/api/media/{media_id}/priority")
+async def update_media_priority(media_id: int, priority: int = Body(..., embed=True)):
+    media = db.get_media_by_id(media_id)
+    if not media:
+        raise HTTPException(404, "Media not found")
+    value = max(0, int(priority))
+    db.update_media_priority(media_id, value)
+    return {"status": "updated", "priority": value}
 
 @app.get("/api/media/{media_id}/tmdb-matches")
 async def tmdb_match_options(media_id: int):
